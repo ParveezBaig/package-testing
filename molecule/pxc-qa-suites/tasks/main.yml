@@ -131,10 +131,29 @@
   # The PXC tarball bundles xtrabackup under bin/pxc_extra/pxb-<ver>/bin. SST finds it
   # on its own; tests that call "xtrabackup" directly (replication/backup_replication.py)
   # need it on PATH.
+  #
+  # It is symlinked into a directory OUTSIDE the basedir rather than putting
+  # <basedir>/bin/pxc_extra/... on PATH: mysqld prepends <basedir>/bin to PATH for the
+  # SST scripts (wsrep_sst_xtrabackup-v2), but wsrep_prepend_PATH() skips that when the
+  # string already occurs anywhere in PATH (strstr), and ".../pxc_basedir/bin/pxc_extra/..."
+  # contains ".../pxc_basedir/bin". Joiners then fail with
+  # "wsrep_sst_xtrabackup-v2: command not found". Keep every basedir path off PATH so
+  # each mysqld (lower or upper version) finds its own SST scripts.
   - name: Locate bundled xtrabackup
     shell: ls -d {{ pxc_basedir }}/bin/pxc_extra/pxb-*/bin 2>/dev/null | sort -V | tail -1
     register: pxb_bin_dir
     changed_when: false
+
+  - name: Link bundled xtrabackup tools into {{ qa_home }}/xtrabackup-bin
+    shell: |
+      set -e
+      rm -rf {{ qa_home }}/xtrabackup-bin
+      mkdir -p {{ qa_home }}/xtrabackup-bin
+      ln -s {{ pxb_bin_dir.stdout }}/* {{ qa_home }}/xtrabackup-bin/
+      chown -h -R {{ qa_user }}:{{ qa_user }} {{ qa_home }}/xtrabackup-bin
+      ls -l {{ qa_home }}/xtrabackup-bin
+    register: pxb_links
+    when: pxb_bin_dir.stdout | length > 0
 
   - name: Decide whether pstress is needed (random_qa suite)
     set_fact:
@@ -172,6 +191,7 @@
       - { section: config, option: pt_basedir, value: /usr }
       - { section: config, option: pstress_bin, value: "{{ qa_home }}/pstress/src/pstress-pxc" }
       - { section: config, option: pstress_grammar_file, value: "{{ qa_home }}/pstress/src/grammar.sql" }
+      - { section: config, option: randgen_dir, value: "{{ qa_home }}/percona-qa/randgen" }
       - { section: sysbench, option: sysbench_dir, value: /usr/share/sysbench }
 
   # Only upgrade tests read these (pxc-qa checks them per test), so they are set
@@ -255,10 +275,12 @@
     # QA_TIMEOUT_HOURS doubles as a hard timeout.
     # qa_framework.py starts every test with sys.executable, so running it with the
     # venv interpreter is enough for the tests to get mysql-connector.
+    # PATH must not contain any path under a PXC basedir (see "Link bundled
+    # xtrabackup tools"): mysqld adds its own <basedir>/bin for the SST scripts.
     - name: Run qa_framework.py {{ qa_args | join(' ') }}
       shell: |
         runuser -u {{ qa_user }} -- env \
-          PATH="{{ pxb_bin_dir.stdout }}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+          PATH="{{ qa_home }}/xtrabackup-bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
           PYTHONIOENCODING=utf-8 \
           PYTHONUNBUFFERED=1 \
           QA_ARGS={{ qa_args | join(' ') | quote }} \
