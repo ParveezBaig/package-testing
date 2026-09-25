@@ -1,0 +1,190 @@
+---
+- name: Prepare node for running pxc-qa suites
+  hosts: all
+  become: true
+  become_method: sudo
+  gather_facts: true
+  vars:
+    qa_user: pxcqa
+    qa_home: /home/pxcqa
+    qa_venv: /opt/pxc-qa-venv
+  tasks:
+
+    - name: Setup SSH keys for Oracle Linux or Amazon
+      authorized_key:
+        user: ec2-user
+        key: "{{ lookup('file', 'public_keys') }}"
+        state: present
+        exclusive: False
+      when: ansible_os_family == "RedHat"
+
+    - name: Setup SSH keys Debian
+      authorized_key:
+        user: admin
+        key: "{{ lookup('file', 'public_keys') }}"
+        state: present
+        exclusive: False
+      when: ansible_distribution == "Debian"
+
+    - name: Setup SSH keys Ubuntu
+      authorized_key:
+        user: ubuntu
+        key: "{{ lookup('file', 'public_keys') }}"
+        state: present
+        exclusive: False
+      when: ansible_distribution == "Ubuntu"
+
+    # mysqld refuses to start as root and pxc-qa does not pass --user,
+    # so the whole framework runs as this unprivileged user.
+    - name: Create {{ qa_user }} user for running pxc-qa (non-root)
+      ansible.builtin.user:
+        name: "{{ qa_user }}"
+        comment: "pxc-qa test user"
+        home: "{{ qa_home }}"
+        create_home: true
+        shell: /bin/bash
+        state: present
+
+    - name: Install packages for Debian family
+      apt:
+        name:
+          - git
+          - tar
+          - python3
+          - python3-pip
+          - python3-venv
+          - libaio1
+          - libnuma1
+          - libatomic1
+          - libev4
+          - socat
+          - rsync
+          - lsof
+          - openssl
+          - gawk
+          - procps
+          - psmisc
+          - cmake
+          - make
+          - gcc
+          - g++
+          - libssl-dev
+          - zlib1g-dev
+          - sysbench
+        update_cache: yes
+        state: present
+      when: ansible_os_family == "Debian"
+
+    # EPEL provides libev (needed by the bundled xtrabackup) and sysbench.
+    - name: Install EPEL GPG key (RedHat family)
+      rpm_key:
+        state: present
+        key: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+      when: ansible_os_family == "RedHat"
+
+    - name: Setup EPEL repo (RedHat family)
+      dnf:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install packages for RedHat family
+      dnf:
+        name:
+          - git
+          - tar
+          - python3
+          - python3-pip
+          - libaio
+          - numactl-libs
+          - libatomic
+          - libev
+          - socat
+          - rsync
+          - lsof
+          - openssl
+          - gawk
+          - procps-ng
+          - psmisc
+          - cmake
+          - make
+          - gcc
+          - gcc-c++
+          - zlib-devel
+          - sysbench
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    # Pin openssl-devel to the installed openssl-libs version. A plain install can
+    # upgrade openssl-libs underneath the running sshd on older OL9 AMIs and make the
+    # host unreachable mid-run (same workaround as molecule/pxb-new-ps-*).
+    - name: Gather installed package facts (RedHat)
+      ansible.builtin.package_facts:
+        manager: rpm
+      when: ansible_os_family == "RedHat"
+
+    - name: Install openssl-devel pinned to installed openssl-libs version (RedHat)
+      ansible.builtin.dnf:
+        name: "openssl-devel-{{ ansible_facts.packages['openssl-libs'][0].version }}-{{ ansible_facts.packages['openssl-libs'][0].release }}"
+        state: present
+        allow_downgrade: true
+      when:
+        - ansible_os_family == "RedHat"
+        - "'openssl-libs' in ansible_facts.packages"
+
+    - name: Install percona-release for Debian family
+      apt:
+        deb: https://repo.percona.com/apt/percona-release_latest.generic_all.deb
+      when: ansible_os_family == "Debian"
+
+    - name: Install percona-release for RedHat family
+      command: dnf -y install https://repo.percona.com/yum/percona-release-latest.noarch.rpm
+      args:
+        creates: /usr/bin/percona-release
+      when: ansible_os_family == "RedHat"
+
+    - name: Enable Percona Toolkit repository
+      command: percona-release enable pt
+      changed_when: false
+
+    # pxc-qa config.ini gets pt_basedir = /usr, i.e. /usr/bin/pt-table-checksum
+    - name: Install Percona Toolkit
+      package:
+        name: percona-toolkit
+        state: latest
+        update_cache: "{{ ansible_os_family == 'Debian' }}"
+
+    # A venv sidesteps PEP 668 (Debian 12+) and keeps mysql-connector off the system
+    # python. tasks/main.yml runs qa_framework.py with the venv's python3, and the
+    # framework starts each test with that same interpreter (sys.executable).
+    # setuptools provides the "distutils" shim that util/pxc_startup.py imports on
+    # Python >= 3.12.
+    - name: Create pxc-qa virtualenv with mysql-connector-python
+      pip:
+        name:
+          - mysql-connector-python
+          - setuptools
+        virtualenv: "{{ qa_venv }}"
+        virtualenv_command: python3 -m venv
+
+    - name: Checkout pxc-qa repository
+      git:
+        repo: "{{ lookup('env', 'PXC_QA_REPO') | default('https://github.com/Percona-QA/pxc-qa', true) }}"
+        dest: "{{ qa_home }}/pxc-qa"
+        version: "{{ lookup('env', 'PXC_QA_BRANCH') | default('master', true) }}"
+        force: yes
+
+    - name: Checkout pstress repository
+      git:
+        repo: https://github.com/Percona-QA/pstress.git
+        dest: "{{ qa_home }}/pstress"
+        version: "{{ lookup('env', 'PSTRESS_BRANCH') | default('master', true) }}"
+        force: yes
+
+    - name: Give {{ qa_user }} ownership of its home (repos cloned as root)
+      ansible.builtin.file:
+        path: "{{ qa_home }}"
+        state: directory
+        owner: "{{ qa_user }}"
+        group: "{{ qa_user }}"
+        recurse: true
