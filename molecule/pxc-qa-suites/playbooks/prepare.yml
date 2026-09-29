@@ -70,6 +70,8 @@
           - g++
           - libssl-dev
           - zlib1g-dev
+          # pstress links ssl, crypto, z and zstd (cmake/PQSetupCompiler.cmake)
+          - libzstd-dev
           - sysbench
           # randgen (gendata.pl): DBI + DBD::mysql; GDBM_File comes with perl (libperl5.x)
           - perl
@@ -115,6 +117,9 @@
           - gcc
           - gcc-c++
           - zlib-devel
+          # pstress links ssl, crypto, z and zstd (cmake/PQSetupCompiler.cmake);
+          # openssl-devel is installed below, pinned to the running openssl-libs
+          - libzstd-devel
           - sysbench
           # randgen (gendata.pl): DBI + DBD::mysql, and GDBM_File is a separate rpm here
           - perl
