@@ -81,17 +81,27 @@
         state: present
       when: ansible_os_family == "Debian"
 
-    # EPEL provides libev (needed by the bundled xtrabackup) and sysbench.
-    - name: Install EPEL GPG key (RedHat family)
-      rpm_key:
-        state: present
-        key: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      when: ansible_os_family == "RedHat"
-
+    # EPEL provides libev (needed by the bundled xtrabackup) and sysbench. Oracle's own
+    # EPEL mirror (oracle-epel-release-el9) has sysbench but not libev, so Fedora EPEL.
+    # It is fetched through the download.fedoraproject.org mirror redirector because the
+    # direct host dl.fedoraproject.org intermittently returns 404. The epel-release rpm
+    # ships the EPEL GPG key itself (its repo file points at the local copy), so there
+    # is no separate key download; the rpm is fetched over HTTPS from Fedora.
     - name: Setup EPEL repo (RedHat family)
       dnf:
-        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
+        name: "https://download.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
         state: present
+        disable_gpg_check: true
+      register: epel_release
+      retries: 5
+      delay: 15
+      until: epel_release is succeeded
+      when: ansible_os_family == "RedHat"
+
+    - name: Import EPEL GPG key from the epel-release package (RedHat family)
+      rpm_key:
+        state: present
+        key: "/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
       when: ansible_os_family == "RedHat"
 
     - name: Install packages for RedHat family
