@@ -119,6 +119,34 @@
       group: "{{ qa_user }}"
     when: pxc_lower_tarball_url | length > 0
 
+  # The SST script (wsrep_sst_xtrabackup-v2) always runs the bundled xtrabackup with
+  # --xtrabackup-plugin-dir=<basedir>/bin/pxc_extra/pxb-<ver>/lib/plugin, but the PXC
+  # binary tarballs ship those plugins (component_keyring_*.so) in
+  # pxc_extra/pxb-<ver>/lib/xtrabackup/plugin and have no lib/plugin. With a keyring
+  # (encryption runs) the donor's xtrabackup then cannot load component_keyring_file
+  # ("failed to init keyring component") and every SST fails. Link lib/plugin to
+  # xtrabackup/plugin wherever it is missing; tarballs that already have lib/plugin
+  # are left alone.
+  - name: Link pxc_extra lib/plugin to lib/xtrabackup/plugin for SST
+    shell: |
+      for libdir in {{ ([pxc_basedir] + ([pxc_lower_basedir] if pxc_lower_tarball_url | length > 0 else []))
+                       | map('regex_replace', '$', '/bin/pxc_extra/pxb-*/lib') | join(' ') }}; do
+        [ -d "$libdir" ] || continue
+        if [ ! -e "$libdir/plugin" ] && [ -d "$libdir/xtrabackup/plugin" ]; then
+          ln -s xtrabackup/plugin "$libdir/plugin"
+          chown -h {{ qa_user }}:{{ qa_user }} "$libdir/plugin"
+          echo "linked $libdir/plugin -> xtrabackup/plugin"
+        else
+          echo "unchanged $libdir/plugin"
+        fi
+      done
+    register: pxb_plugin_links
+    changed_when: "'linked ' in pxb_plugin_links.stdout"
+
+  - name: Print pxc_extra plugin directory links
+    debug:
+      msg: "{{ pxb_plugin_links.stdout_lines }}"
+
   - name: Check mysqld version from the tarball
     command: "{{ pxc_basedir }}/bin/mysqld --version"
     register: mysqld_version
