@@ -121,24 +121,34 @@
 
   # The SST script (wsrep_sst_xtrabackup-v2) always runs the bundled xtrabackup with
   # --xtrabackup-plugin-dir=<basedir>/bin/pxc_extra/pxb-<ver>/lib/plugin, but the PXC
-  # binary tarballs ship those plugins (component_keyring_*.so) in
-  # pxc_extra/pxb-<ver>/lib/xtrabackup/plugin and have no lib/plugin. With a keyring
-  # (encryption runs) the donor's xtrabackup then cannot load component_keyring_file
-  # ("failed to init keyring component") and every SST fails. Link lib/plugin to
-  # xtrabackup/plugin wherever it is missing; tarballs that already have lib/plugin
-  # are left alone.
-  - name: Link pxc_extra lib/plugin to lib/xtrabackup/plugin for SST
+  # binary tarballs put those plugins (component_keyring_*.so) elsewhere, and where
+  # differs per tarball build, e.g. for PXC 8.4.7:
+  #   glibc2.35: pxc_extra/pxb-8.4/lib/xtrabackup/plugin
+  #   glibc2.34: pxc_extra/pxb-8.4/lib/lib64/xtrabackup/plugin  (pxb-8.0: lib/plugin)
+  # With a keyring (encryption runs) the donor's xtrabackup then cannot load
+  # component_keyring_file ("failed to init keyring component") and every SST fails.
+  # Where lib/plugin is missing, link it to the directory that actually holds
+  # component_keyring_file.so (skipping .build-id debug links); an existing
+  # lib/plugin is left alone.
+  - name: Link pxc_extra lib/plugin to the bundled xtrabackup plugin directory for SST
     shell: |
       for libdir in {{ ([pxc_basedir] + ([pxc_lower_basedir] if pxc_lower_tarball_url | length > 0 else []))
                        | map('regex_replace', '$', '/bin/pxc_extra/pxb-*/lib') | join(' ') }}; do
         [ -d "$libdir" ] || continue
-        if [ ! -e "$libdir/plugin" ] && [ -d "$libdir/xtrabackup/plugin" ]; then
-          ln -s xtrabackup/plugin "$libdir/plugin"
-          chown -h {{ qa_user }}:{{ qa_user }} "$libdir/plugin"
-          echo "linked $libdir/plugin -> xtrabackup/plugin"
-        else
-          echo "unchanged $libdir/plugin"
+        if [ -e "$libdir/plugin" ]; then
+          echo "unchanged $libdir/plugin (already exists)"
+          continue
         fi
+        component=$(find "$libdir" -path "$libdir/.build-id" -prune -o \
+                      -name component_keyring_file.so -type f -print | head -1)
+        if [ -z "$component" ]; then
+          echo "unchanged $libdir/plugin (no component_keyring_file.so found under $libdir)"
+          continue
+        fi
+        target=$(dirname "${component#$libdir/}")
+        ln -s "$target" "$libdir/plugin"
+        chown -h {{ qa_user }}:{{ qa_user }} "$libdir/plugin"
+        echo "linked $libdir/plugin -> $target"
       done
     register: pxb_plugin_links
     changed_when: "'linked ' in pxb_plugin_links.stdout"
