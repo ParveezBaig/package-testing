@@ -166,32 +166,61 @@
     debug:
       msg: "{{ mysqld_version.stdout }}"
 
-  # The PXC tarball bundles xtrabackup under bin/pxc_extra/pxb-<ver>/bin. SST finds it
-  # on its own; tests that call "xtrabackup" directly (replication/backup_replication.py)
-  # need it on PATH.
+  # SST uses the xtrabackup bundled in the PXC tarball (the SST script runs
+  # pxc_extra/pxb-<ver>/bin/xtrabackup by absolute path; see the lib/plugin link above).
+  # Tests that run "xtrabackup" themselves (replication/backup_replication.py, found
+  # via PATH) get a separately installed Percona XtraBackup package instead, like a
+  # local setup: the bundled build looks for its plugins (component_keyring_file for
+  # encryption runs) in its compile-time /usr/local/xtrabackup/lib/plugin, while the
+  # package's built-in plugin dir is where the package installs them.
+  # Installed only when such a test can run: an explicit QA_TESTS list naming
+  # backup_replication, or the replication suite (also part of the framework defaults
+  # when QA_SUITES and QA_TESTS are empty), or INSTALL_PXB=true.
   #
-  # It is symlinked into a directory OUTSIDE the basedir rather than putting
-  # <basedir>/bin/pxc_extra/... on PATH: mysqld prepends <basedir>/bin to PATH for the
-  # SST scripts (wsrep_sst_xtrabackup-v2), but wsrep_prepend_PATH() skips that when the
-  # string already occurs anywhere in PATH (strstr), and ".../pxc_basedir/bin/pxc_extra/..."
-  # contains ".../pxc_basedir/bin". Joiners then fail with
-  # "wsrep_sst_xtrabackup-v2: command not found". Keep every basedir path off PATH so
-  # each mysqld (lower or upper version) finds its own SST scripts.
-  - name: Locate bundled xtrabackup
-    shell: ls -d {{ pxc_basedir }}/bin/pxc_extra/pxb-*/bin 2>/dev/null | sort -V | tail -1
-    register: pxb_bin_dir
-    changed_when: false
+  # The job never puts a basedir path on PATH: mysqld adds its own <basedir>/bin for
+  # the SST scripts, but skips that when the string already occurs anywhere in PATH
+  # (strstr in wsrep_prepend_PATH()), and joiners then fail with
+  # "wsrep_sst_xtrabackup-v2: command not found".
+  - name: Decide whether a separate xtrabackup is needed
+    vars:
+      upstream: "{{ pxc_version.split('-')[0] }}"
+    set_fact:
+      need_pxb: >-
+        {{ lookup('env', 'INSTALL_PXB') | lower == 'true'
+           or ('backup_replication' in qa_tests if qa_tests | length > 0
+               else (qa_suites | length == 0 or 'replication' in qa_suites.split(','))) }}
+      pxb_series: "{{ upstream.split('.')[0] }}{{ upstream.split('.')[1] }}"
+      # PXC series -> percona-release repository of the matching XtraBackup
+      pxb_repo: "{{ {'80': 'pxb-80', '84': 'pxb-84-lts'}.get(upstream.split('.')[0] ~ upstream.split('.')[1], '') }}"
 
-  - name: Link bundled xtrabackup tools into {{ qa_home }}/xtrabackup-bin
-    shell: |
-      set -e
-      rm -rf {{ qa_home }}/xtrabackup-bin
-      mkdir -p {{ qa_home }}/xtrabackup-bin
-      ln -s {{ pxb_bin_dir.stdout }}/* {{ qa_home }}/xtrabackup-bin/
-      chown -h -R {{ qa_user }}:{{ qa_user }} {{ qa_home }}/xtrabackup-bin
-      ls -l {{ qa_home }}/xtrabackup-bin
-    register: pxb_links
-    when: pxb_bin_dir.stdout | length > 0
+  - name: Install Percona XtraBackup {{ pxb_series }} package (for backup_replication.py)
+    when: need_pxb | bool
+    block:
+      - name: Check a Percona XtraBackup repository exists for PXC {{ pxb_series }}
+        assert:
+          that: pxb_repo | length > 0
+          fail_msg: >-
+            No Percona XtraBackup repository is mapped for PXC {{ pxc_version }}.
+            Add it to pxb_repo in tasks/main.yml, or disable replication/backup_replication.py.
+
+      - name: Enable Percona XtraBackup repository
+        command: percona-release enable {{ pxb_repo }} release
+        changed_when: false
+
+      - name: Install percona-xtrabackup-{{ pxb_series }}
+        package:
+          name: "percona-xtrabackup-{{ pxb_series }}"
+          state: latest
+          update_cache: "{{ ansible_os_family == 'Debian' }}"
+
+      - name: Check installed xtrabackup
+        command: xtrabackup --version
+        register: pxb_version
+        changed_when: false
+
+      - name: Print installed xtrabackup
+        debug:
+          msg: "{{ pxb_version.stderr_lines + pxb_version.stdout_lines }}"
 
   - name: Decide whether pstress is needed (random_qa suite)
     set_fact:
@@ -313,12 +342,12 @@
     # QA_TIMEOUT_HOURS doubles as a hard timeout.
     # qa_framework.py starts every test with sys.executable, so running it with the
     # venv interpreter is enough for the tests to get mysql-connector.
-    # PATH must not contain any path under a PXC basedir (see "Link bundled
-    # xtrabackup tools"): mysqld adds its own <basedir>/bin for the SST scripts.
+    # Plain system PATH, nothing under a PXC basedir (see "Decide whether a separate
+    # xtrabackup is needed"); the packaged xtrabackup, if installed, is in /usr/bin.
     - name: Run qa_framework.py {{ qa_args | join(' ') }}
       shell: |
         runuser -u {{ qa_user }} -- env \
-          PATH="{{ qa_home }}/xtrabackup-bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+          PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
           PYTHONIOENCODING=utf-8 \
           PYTHONUNBUFFERED=1 \
           QA_ARGS={{ qa_args | join(' ') | quote }} \
