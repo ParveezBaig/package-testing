@@ -113,6 +113,8 @@
           - python3-pip
           - libaio
           - numactl-libs
+          # libcrypt.so.1 for the PXC 5.7 (glibc2.17) tarball
+          - libxcrypt-compat
           - libatomic
           - libev
           - socat
